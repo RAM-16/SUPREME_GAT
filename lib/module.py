@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 from torch_geometric.nn import GCNConv
 from collections import Counter
+#torch.cuda.set_device(1)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class Net(torch.nn.Module):
     def __init__(self, in_size=16, hid_size=8, out_size=2):

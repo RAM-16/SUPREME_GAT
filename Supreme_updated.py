@@ -1,35 +1,35 @@
 # Options
 addRawFeat = True
 base_path = ''
-feature_networks_integration = ['clinical', 'cna', 'exp'] # datatypes to concatanate node features from
-node_networks = ['clinical', 'cna', 'exp'] # datatypes to use networks from
+feature_networks_integration = ['gene', 'meth'] # datatypes to concatanate node features from
+node_networks = ['gene', 'meth'] # datatypes to use networks from
 int_method = 'MLP' # Machine Learning method to integrate node embeddings: 'MLP' or 'XGBoost' or 'RF' or 'SVM'
 
 
 # optimize for hyperparameter tuning
 learning_rates = [0.01, 0.001, 0.0001] # learning rates to tune for GCN
 hid_sizes = [32, 64, 128, 256] # hidden sizes to tune for GCN
-xtimes = 50 #number of times Machine Learning algorithm will be tuned for each combination
-xtimes2 = 10 # number of times each evaluation metric will be repeated (for standard deviation of evaluation metrics)
+xtimes = 1 #number of times Machine Learning algorithm will be tuned for each combination
+xtimes2 = 2 # number of times each evaluation metric will be repeated (for standard deviation of evaluation metrics)
 
 # optimize for optional feature selection of node features
 feature_selection_per_network = [False, False, False]
 top_features_per_network = [50, 50, 50]
 optional_feat_selection = False
-boruta_runs = 100
+boruta_runs = 11
 boruta_top_features = 50
 
 # fixed
-max_epochs = 500
-min_epochs = 200
-patience = 30
+max_epochs = 30
+min_epochs = 2
+patience = 3
 
 # fixed to get the same results from the tool each time
 random_state = 404
 
 # SUPREME run
 print('SUPREME is setting up!')
-from lib import module
+from lib import moduleGAT
 import time
 import os, itertools
 import pickle
@@ -40,17 +40,22 @@ from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split, RandomizedSearchCV, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+import torch.nn as nn
 import pandas as pd
 import numpy as np
 from torch_geometric.data import Data
 import os
 import torch
+import torch.optim as optim
 import argparse
 import errno
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 os.environ["R_HOME"] = "C:\Program Files\R\R-4.4.1"
+
+#os.environ['R_HOME'] = '/usr/lib/R/bin/R'   
 
 if ((True in feature_selection_per_network) or (optional_feat_selection == True)):
     import rpy2
@@ -67,7 +72,7 @@ if ((True in feature_selection_per_network) or (optional_feat_selection == True)
 parser = argparse.ArgumentParser(description='''An integrative node classification framework, called SUPREME 
 (a subtype prediction methodology), that utilizes graph convolutions on multiple datatype-specific networks that are annotated with multiomics datasets as node features. 
 This framework is model-agnostic and could be applied to any classification problem with properly processed datatypes and networks.''')
-parser.add_argument('-data', "--data_location", nargs = 1, default = ['sample_data'])
+parser.add_argument('-data', "--data_location", nargs = 1, default = ['gbmUpdated_data'])
 
 args = parser.parse_args()
 dataset_name = args.data_location[0]
@@ -78,6 +83,7 @@ if not os.path.exists(path):
 
 
 
+#torch.cuda.set_device(1)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
@@ -109,7 +115,7 @@ save_path = base_path + run_name + '/'
 if not os.path.exists(base_path + run_name):
     os.makedirs(base_path + run_name + '/')
 
-file = base_path + 'data/' + dataset_name +'/labels.pkl'
+file = base_path + 'data/' + dataset_name +'/gbm_labels.pkl'
 with open(file, 'rb') as f:
     labels = pickle.load(f)
 
@@ -177,15 +183,19 @@ for netw in node_networks:
 # Node embedding generation using GCN for each input network with hyperparameter tuning   
 for n in range(len(node_networks)):
     netw_base = node_networks[n]
+    print('dataset: ',n)
     with open(data_path_node + 'edges_' + netw_base + '.pkl', 'rb') as f:
         edge_index = pd.read_pickle(f)
     best_ValidLoss = np.Inf
     
     for learning_rate in learning_rates:
+        print('learning_rate: ', learning_rate)
         for hid_size in hid_sizes:
+            print('hidden_size: ', hid_size)
             av_valid_losses = list()
 
             for ii in range(xtimes2):
+                print('xtimes2: ', ii)
                 data = Data(x=new_x, edge_index=torch.tensor(edge_index[edge_index.columns[0:2]].transpose().values, device=device).long(),
                             edge_attr=torch.tensor(edge_index[edge_index.columns[2]].transpose().values, device=device).float(), y=labels) 
                 X = data.x[train_valid_idx]
@@ -206,7 +216,7 @@ for n in range(len(node_networks)):
 
                 in_size = data.x.shape[1]
                 out_size = torch.unique(data.y).shape[0]
-                model = module.Net(in_size=in_size, hid_size=hid_size, out_size=out_size)
+                model = moduleGAT.Net(in_size=in_size, hid_size=hid_size, out_size=out_size)
                 model = model.to(device)
                 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -214,6 +224,7 @@ for n in range(len(node_networks)):
                 patience_count = 0
 
                 for epoch in range(max_epochs):
+                    print('epoch:',epoch)
                     emb = train()
                     this_valid_loss, emb = validate()
 
@@ -241,7 +252,9 @@ for n in range(len(node_networks)):
     emb_file = save_path + 'Emb_' +  netw_base + '.pkl'
     with open(emb_file, 'wb') as f:
         pickle.dump(selected_emb, f)
-        pd.DataFrame(selected_emb).to_csv(emb_file[:-4] + '.csv')
+        selected_emb_cpu = selected_emb.cpu()  # Move the tensor to the CPU
+        selected_emb_numpy = selected_emb_cpu.numpy()  # Convert to a NumPy array
+        pd.DataFrame(selected_emb_numpy).to_csv(emb_file[:-4] + '.csv')
     
 start2 = time.time()    
 print('It took ' + str(round(start2 - start, 1)) + ' seconds for node embedding generation (' + str(len(learning_rates)*len(hid_sizes))+ ' trials for ' + str(len(node_networks)) + ' seperate GCNs).')
@@ -313,7 +326,7 @@ for trials in range(len(trial_combs)):
             topx = []
             for index in boruta_signif:
                 t_index=re.sub("`","",index)
-                topx.append((np.array(allx).T)[int(t_index)-1])
+                topx.append((np.array(allx.cpu()).T)[int(t_index)-1])
             topx = np.array(topx)
             emb = torch.cat((emb, torch.tensor(topx.T, device=device)), dim=1)
             print('Top ' + str(boruta_top_features) + " features have been selected.")
@@ -326,19 +339,172 @@ for trials in range(len(trial_combs)):
     data.train_mask = torch.tensor(train_mask, device=device)
     test_mask = np.array([i in set(test_idx) for i in range(data.x.shape[0])])
     data.test_mask = torch.tensor(test_mask, device=device)
-    X_train = pd.DataFrame(data.x[data.train_mask].numpy())
-    X_test = pd.DataFrame(data.x[data.test_mask].numpy())
-    y_train = pd.DataFrame(data.y[data.train_mask].numpy()).values.ravel()
-    y_test = pd.DataFrame(data.y[data.test_mask].numpy()).values.ravel()
+    X_train = pd.DataFrame(data.x[data.train_mask].cpu().numpy()).values
+    X_test = pd.DataFrame(data.x[data.test_mask].cpu().numpy()).values
+    y_train = pd.DataFrame(data.y[data.train_mask].cpu().numpy()).values.ravel()
+    y_test = pd.DataFrame(data.y[data.test_mask].cpu().numpy()).values.ravel()
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
     
     if int_method == 'MLP':
-        params = {'hidden_layer_sizes': [(16,), (32,),(64,),(128,),(256,),(512,), (32, 32), (64, 32), (128, 32), (256, 32), (512, 32)]}
-        search = RandomizedSearchCV(estimator = MLPClassifier(solver = 'adam', activation = 'relu', early_stopping = True), 
+
+        if fc == '0':
+            params = {'hidden_layer_sizes': [(16,), (32,),(64,),(128,),(256,),(512,), (32, 32), (64, 32), (128, 32), (256, 32), (512, 32)]}
+            search = RandomizedSearchCV(estimator = MLPClassifier(solver = 'adam', activation = 'relu', early_stopping = True), 
                                     return_train_score = True, scoring = 'f1_macro', 
                                     param_distributions = params, cv = 4, n_iter = xtimes, verbose = 0)
-        search.fit(X_train, y_train)
-        model = MLPClassifier(solver = 'adam', activation = 'relu', early_stopping = True,
+            search.fit(X_train, y_train)
+            model = MLPClassifier(solver = 'adam', activation = 'relu', early_stopping = True,
                               hidden_layer_sizes = search.best_params_['hidden_layer_sizes'])
+            
+        else:
+
+            class MLP(nn.Module):
+                def __init__(self, input_size, hidden_sizes, output_size):
+                    super(MLP, self).__init__()
+                    layers = []
+
+                    in_size = input_size
+                    for hidden_size in hidden_sizes:
+                        layers.append(nn.Linear(in_size, hidden_size))
+                        layers.append(nn.ReLU())
+                        in_size = hidden_size
+
+                    layers.append(nn.Linear(in_size, output_size))
+
+                    self.network = nn.Sequential(*layers)
+
+                def forward(self, x):
+
+                    return self.network(x)
+                
+            # converting the datasets to torch
+
+            X_train_tensor = torch.tensor(X_train, device= device)
+            X_test_tensor = torch.tensor(X_test, device= device)
+            y_train_tensor = torch.tensor(y_train, device= device)
+            y_test_tensor = torch.tensor(y_test, device= device)
+
+            input_size = X_train_tensor.shape[1]
+            output_size = len(set(y_train_tensor.cpu().numpy()))
+
+            hidden_layer_sizes = [
+                (16,), (32,), (64,), (128,), (256,), (512,),  # Single hidden layers with different sizes
+                (32, 32), (64, 32), (128, 32), (256, 32), (512, 32)]  # Multiple hidden layers
+            
+            av_result_acc = []
+            av_result_wf1 = []
+            av_result_mf1 = []
+            av_tr_result_acc = []
+            av_tr_result_wf1 = []
+            av_tr_result_mf1 = []
+
+            best_f1 = 0
+            best_model = None
+            best_hidden_layers = None
+
+            for hidden_size_tuple in hidden_layer_sizes:
+            # Initialize the model with current hidden layer configuration
+                model = MLP(input_size=input_size, hidden_sizes=hidden_size_tuple, output_size=output_size).to(device)
+
+                optimizer = optim.Adam(model.parameters(), lr =0.001)
+
+
+        
+            
+
+                criterion = nn.CrossEntropyLoss()
+
+                num_epochs = 50
+                batch_size = 32
+                model.train() 
+
+                perm = torch.randperm(X_train_tensor.size(0))
+
+                for epoch in range(num_epochs):
+                    running_loss = 0.0
+                    correct_predictions = 0
+                    total_predictions = 0
+                
+                    
+                        
+                        # Zero gradients
+                    optimizer.zero_grad()
+                    
+                    # Forward pass
+                    outputs = model(X_train_tensor)
+                    
+                    # Compute the loss
+                    loss = criterion(outputs, y_train_tensor)
+                    
+                    # Backward pass and optimization
+                    loss.backward()
+                    optimizer.step()
+                    
+                    running_loss += loss.item()
+                    
+                    # Compute accuracy for the batch
+                    _, predicted = torch.max(outputs, 1)
+                    correct_predictions += (predicted == y_train_tensor).sum().item()
+                    total_predictions += y_train_tensor.size(0)
+                
+                # Track the loss and accuracy per epoch
+                    epoch_loss = running_loss / (X_train_tensor.size(0) // batch_size)
+                    epoch_acc = correct_predictions / total_predictions * 100
+
+                    print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.2f}%")
+
+
+                model.eval()  # Set the model to evaluation mode
+                with torch.no_grad():
+                    outputs = model(X_test_tensor)
+                    _, predicted = torch.max(outputs, 1)
+                    
+                    # Calculate F1 score (macro and weighted)
+                    test_f1_weighted = f1_score(y_test_tensor.cpu().numpy(), predicted.cpu().numpy(), average='weighted')
+                    test_f1_macro = f1_score(y_test_tensor.cpu().numpy(), predicted.cpu().numpy(), average='macro')
+
+                    # Track metrics for statistics
+                    av_result_acc.append(accuracy_score(y_test_tensor.cpu().numpy(), predicted.cpu().numpy()))
+                    av_result_wf1.append(test_f1_weighted)
+                    av_result_mf1.append(test_f1_macro)
+
+                    # Training accuracy for statistics
+                    tr_outputs = model(X_train_tensor)
+                    _, tr_predicted = torch.max(tr_outputs, 1)
+                    av_tr_result_acc.append(accuracy_score(y_train_tensor.cpu().numpy(), tr_predicted.cpu().numpy()))
+                    av_tr_result_wf1.append(f1_score(y_train_tensor.cpu().numpy(), tr_predicted.cpu().numpy(), average='weighted'))
+                    av_tr_result_mf1.append(f1_score(y_train_tensor.cpu().numpy(), tr_predicted.cpu().numpy(), average='macro'))
+
+                # Check if the current model is better than the previous best
+                    if test_f1_macro > best_f1:
+                        best_f1 = test_f1_macro
+                        best_model = model
+                        best_hidden_layers = hidden_size_tuple
+
+            result_acc = f"{round(statistics.median(av_result_acc), 3)} ± {round(statistics.stdev(av_result_acc), 3)}"
+            result_wf1 = f"{round(statistics.median(av_result_wf1), 3)} ± {round(statistics.stdev(av_result_wf1), 3)}"
+            result_mf1 = f"{round(statistics.median(av_result_mf1), 3)} ± {round(statistics.stdev(av_result_mf1), 3)}"
+
+            tr_result_acc = f"{round(statistics.median(av_tr_result_acc), 3)} ± {round(statistics.stdev(av_tr_result_acc), 3)}"
+            tr_result_wf1 = f"{round(statistics.median(av_tr_result_wf1), 3)} ± {round(statistics.stdev(av_tr_result_wf1), 3)}"
+            tr_result_mf1 = f"{round(statistics.median(av_tr_result_mf1), 3)} ± {round(statistics.stdev(av_tr_result_mf1), 3)}"
+
+            # Print the best results and statistics
+            print('Combination ' + str(trials) + ' ' + str(node_networks2))
+            print(f"Best Model: Hidden Layers = {best_hidden_layers}, Best Macro F1 Score = {best_f1:.4f}")
+            print(f"Train Accuracy: {tr_result_acc}")
+            print(f"Train Weighted-F1: {tr_result_wf1}")
+            print(f"Train Macro-F1: {tr_result_mf1}")
+            print(f"Test Accuracy: {result_acc}")
+            print(f"Test Weighted-F1: {result_wf1}")
+            print(f"Test Macro-F1: {result_mf1}")
+            
+
+            continue
+
+        
         
     elif int_method == 'XGBoost':
         params = {'reg_alpha':range(0,6,1), 'reg_lambda':range(1,5,1),
@@ -355,7 +521,7 @@ for trials in range(len(trial_combs)):
         
         search.fit(X_train, y_train)
         
-        model = XGBClassifier(use_label_encoder=False, objective="multi:softprob", eval_metric = "mlogloss", verbosity = 0,
+        model = XGBClassifier(use_label_encoder=False, objective="multi:softprob", eval_metric = "mlogloss", verbosity = 0,tree_method='gpu_hist',
                               n_estimators = 1000, fit_params = fit_params,
                               reg_alpha = search.best_params_['reg_alpha'],
                               reg_lambda = search.best_params_['reg_lambda'],
@@ -387,12 +553,11 @@ for trials in range(len(trial_combs)):
     av_tr_result_wf1 = list()
     av_tr_result_mf1 = list()
  
-    model = model.to(device)
     for ii in range(xtimes2):
         model.fit(X_train,y_train)
         predictions = model.predict(X_test)
         y_pred = [round(value) for value in predictions]
-        preds = model.predict(pd.DataFrame(data.x.numpy()))
+        preds = model.predict(pd.DataFrame(data.x.cpu().numpy()))
         av_result_acc.append(round(accuracy_score(y_test, y_pred), 3))
         av_result_wf1.append(round(f1_score(y_test, y_pred, average='weighted'), 3))
         av_result_mf1.append(round(f1_score(y_test, y_pred, average='macro'), 3))
